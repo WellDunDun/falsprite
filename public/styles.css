@@ -533,6 +533,12 @@ button:disabled {
   display: block;
 }
 
+.btn-sheet {
+  font-family: "Silkscreen", cursive;
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+}
+
 .grid-select {
   font-family: "Silkscreen", cursive;
   font-size: 0.62rem;

@@ -1,4 +1,4 @@
-import { validateHttpUrl } from "../../lib/fal.mjs";
+import { validateHttpUrl } from "../lib/replicate.mjs";
 
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
@@ -10,11 +10,14 @@ export default async function handler(req, res) {
     return;
   }
 
-  const apiKey = (req.headers["x-fal-key"] || "").trim();
+  const token = (req.headers["x-replicate-token"] || "").trim();
 
   try {
     const headers = {};
-    if (apiKey) headers.Authorization = `Key ${apiKey}`;
+    // Replicate Files API URLs need auth; replicate.delivery output URLs are public
+    if (token && new URL(mediaUrl).hostname === "api.replicate.com") {
+      headers.Authorization = `Bearer ${token}`;
+    }
 
     const response = await fetch(mediaUrl, { headers });
     if (!response.ok) {

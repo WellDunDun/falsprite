@@ -1,23 +1,24 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────
 // FalSprite batch generator
-// Usage: node batch-generate.mjs --key YOUR_FAL_KEY [--count 10]
+// Usage: node batch-generate.mjs [--key YOUR_REPLICATE_TOKEN] [--count 10]
+// Token falls back to the REPLICATE_API_TOKEN environment variable.
 // ─────────────────────────────────────────────────
 
 import { writeFile, readFile, mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  IMAGE_MODEL, REWRITE_MODEL,
+  createClient, extractOutputUrl, extractOutputText
+} from "./lib/replicate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHOWCASE_DIR = path.join(__dirname, "public", "showcase");
 const SHOWCASE_JSON = path.join(__dirname, "public", "showcase.json");
 
-const ENDPOINT = "fal-ai/nano-banana-2";
-const REWRITE_ENDPOINT = "openrouter/router";
-const REWRITE_MODEL = "openai/gpt-4o-mini";
 const MAX_CONCURRENT = 20;
-const POLL_INTERVAL = 2000;
 const TIMEOUT_MS = 300000;
 
 // ── CLI args ──────────────────────────────────
@@ -40,15 +41,17 @@ function parseArgs() {
 }
 
 const args = parseArgs();
-const API_KEY = args.key || "";
+const API_KEY = args.key || process.env.REPLICATE_API_TOKEN || "";
 const COUNT = Math.max(1, Math.min(200, parseInt(args.count || "10", 10)));
 const GRID = Math.max(2, Math.min(6, parseInt(args.grid || "4", 10)));
+const RESOLUTION = ["1K", "2K", "4K"].includes(args.resolution) ? args.resolution : "2K";
 const FRESH = "fresh" in args;
 
 const NUM_WORDS = { 2: "two", 3: "three", 4: "four", 5: "five", 6: "six" };
 
 if (!API_KEY) {
-  console.error("Usage: node batch-generate.mjs --key YOUR_FAL_KEY [--count 10] [--grid 4] [--fresh]");
+  console.error("Usage: node batch-generate.mjs --key YOUR_REPLICATE_TOKEN [--count 10] [--grid 4] [--resolution 2K] [--fresh]");
+  console.error("       (or set REPLICATE_API_TOKEN)");
   process.exit(1);
 }
 
@@ -74,11 +77,11 @@ const CHARACTERS = [
 ];
 
 const STYLES = [
-  "clean pixel art", "vibrant anime", "cel-shaded cartoon",
-  "pastel dreamlike", "watercolor wash", "retro arcade",
+  "painterly fantasy", "vibrant anime", "cel-shaded cartoon",
+  "pastel dreamlike", "watercolor wash", "digital oil painting",
   "cozy storybook", "chibi kawaii", "soft gradient",
   "neon glow", "hand-drawn sketch", "colorful flat design",
-  "8-bit classic", "Studio Ghibli inspired", "pop art bright"
+  "rich concept art", "Studio Ghibli inspired", "pop art bright"
 ];
 
 function randomPick(arr) {
@@ -114,52 +117,21 @@ function buildRewriteSystem() {
 
 async function rewritePrompt(basePrompt) {
   const w = NUM_WORDS[GRID];
-  const submit = await falRequest(
-    `https://queue.fal.run/${REWRITE_ENDPOINT}`,
-    "POST",
-    {
-      model: REWRITE_MODEL,
-      prompt: `Design the character and choreograph a ${w}-beat animation loop for: ${basePrompt}`,
-      system_prompt: buildRewriteSystem(),
-      max_tokens: 420,
-      temperature: 0.65
-    }
-  );
-
-  if (!submit.ok) return basePrompt;
-  const requestId = submit.data?.request_id;
-  if (!requestId) return basePrompt;
-
-  const deadline = Date.now() + 120000;
-  while (Date.now() < deadline) {
-    const status = await falRequest(
-      `https://queue.fal.run/${REWRITE_ENDPOINT}/requests/${requestId}/status`,
-      "GET"
-    );
-    if (status.data?.status === "COMPLETED") break;
-    if (status.data?.status === "FAILED") return basePrompt;
-    await wait(1500);
+  const client = createClient(API_KEY);
+  try {
+    const output = await client.run(REWRITE_MODEL, {
+      input: {
+        prompt: `Design the character and choreograph a ${w}-beat animation loop for: ${basePrompt}`,
+        system_prompt: buildRewriteSystem(),
+        max_completion_tokens: 500,
+        temperature: 0.65
+      }
+    });
+    const cleaned = extractOutputText(output);
+    return cleaned.length > 20 ? cleaned : basePrompt;
+  } catch {
+    return basePrompt;
   }
-
-  if (Date.now() >= deadline) return basePrompt;
-
-  const result = await falRequest(
-    `https://queue.fal.run/${REWRITE_ENDPOINT}/requests/${requestId}`,
-    "GET"
-  );
-
-  if (!result.ok) return basePrompt;
-
-  // Extract text from the response
-  const text =
-    result.data?.choices?.[0]?.message?.content ||
-    result.data?.output?.choices?.[0]?.message?.content ||
-    result.data?.output ||
-    result.data?.text ||
-    "";
-
-  const cleaned = typeof text === "string" ? text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/g, "").trim() : "";
-  return cleaned.length > 20 ? cleaned : basePrompt;
 }
 
 function buildSpritePrompt(basePrompt) {
@@ -196,108 +168,29 @@ function buildSpritePrompt(basePrompt) {
   ].join("\n");
 }
 
-// ── FAL API helpers ───────────────────────────
-
-async function falRequest(url, method, body) {
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "Authorization": `Key ${API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  return { ok: res.ok, status: res.status, data };
-}
-
-function wait(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+// ── Replicate API helpers ─────────────────────
 
 async function generateSprite(prompt) {
   const fullPrompt = buildSpritePrompt(prompt);
+  const client = createClient(API_KEY);
 
-  // Submit to queue
-  const submit = await falRequest(
-    `https://queue.fal.run/${ENDPOINT}`,
-    "POST",
-    {
+  const output = await client.run(IMAGE_MODEL, {
+    input: {
       prompt: fullPrompt,
       aspect_ratio: "1:1",
-      resolution: "2K",
-      num_images: 1,
-      output_format: "png",
-      safety_tolerance: 2,
-      expand_prompt: true
+      resolution: RESOLUTION,
+      output_format: "png"
     }
-  );
+  });
 
-  if (!submit.ok) {
-    throw new Error(`Submit failed (${submit.status}): ${JSON.stringify(submit.data)}`);
-  }
-
-  const requestId = submit.data?.request_id;
-  if (!requestId) throw new Error("No request_id from queue");
-
-  // Poll for completion
-  const deadline = Date.now() + TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const status = await falRequest(
-      `https://queue.fal.run/${ENDPOINT}/requests/${requestId}/status`,
-      "GET"
-    );
-
-    if (status.data?.status === "COMPLETED") break;
-    if (status.data?.status === "FAILED") {
-      throw new Error(`Generation failed: ${JSON.stringify(status.data)}`);
-    }
-
-    await wait(POLL_INTERVAL);
-  }
-
-  if (Date.now() >= deadline) throw new Error("Timeout waiting for generation");
-
-  // Get result
-  const result = await falRequest(
-    `https://queue.fal.run/${ENDPOINT}/requests/${requestId}`,
-    "GET"
-  );
-
-  if (!result.ok) throw new Error(`Result fetch failed (${result.status})`);
-
-  // Extract image URL
-  const imageUrl = findImageUrl(result.data);
+  const imageUrl = extractOutputUrl(output);
   if (!imageUrl) throw new Error("No image URL in result");
 
   return imageUrl;
 }
 
-function findImageUrl(data) {
-  if (data?.images?.[0]?.url) return data.images[0].url;
-  if (data?.image?.url) return data.image.url;
-
-  const stack = [data];
-  while (stack.length) {
-    const node = stack.pop();
-    if (!node || typeof node !== "object") continue;
-    for (const [key, val] of Object.entries(node)) {
-      if (typeof val === "string" && val.startsWith("https") &&
-          /\.(png|jpg|jpeg|webp)(\?|$)/i.test(val)) {
-        return val;
-      }
-      if (val && typeof val === "object") stack.push(val);
-    }
-  }
-  return "";
-}
-
 async function downloadImage(url, filepath) {
-  const res = await fetch(url, {
-    headers: { "Authorization": `Key ${API_KEY}` }
-  });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`Download failed (${res.status})`);
   const buffer = Buffer.from(await res.arrayBuffer());
   await writeFile(filepath, buffer);

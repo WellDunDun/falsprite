@@ -24,13 +24,13 @@ const RANDOM_SUBJECTS = [
 ];
 
 const RANDOM_STYLES = [
-  "clean pixel art",
+  "painterly fantasy",
   "Studio Ghibli inspired",
-  "chibi kawaii",
+  "vibrant anime",
   "pastel dreamlike",
   "cozy storybook",
   "hand-drawn sketch",
-  "retro arcade"
+  "cel-shaded cartoon"
 ];
 
 const elements = {
@@ -54,7 +54,9 @@ const elements = {
   downloadGifButton: document.querySelector("#downloadGifButton"),
   historyStrip: document.querySelector("#historyStrip"),
   importButton: document.querySelector("#importButton"),
+  importSheetButton: document.querySelector("#importSheetButton"),
   imageFileInput: document.querySelector("#imageFileInput"),
+  sheetFileInput: document.querySelector("#sheetFileInput"),
   imagePreview: document.querySelector("#imagePreview"),
   imagePreviewImg: document.querySelector("#imagePreviewImg"),
   removeImageButton: document.querySelector("#removeImageButton")
@@ -70,6 +72,8 @@ const state = {
     transparentSpriteUrl: "",
     gifUrl: "",
     referenceImageUrl: "",
+    localSheetUrl: "",
+    localSheetFilename: "",
     gridSize: 4
   },
   preview: {
@@ -100,7 +104,9 @@ function wireEvents() {
   elements.downloadTransparentButton.addEventListener("click", onDownloadTransparent);
   elements.downloadGifButton.addEventListener("click", onDownloadGif);
   elements.importButton.addEventListener("click", () => elements.imageFileInput.click());
+  elements.importSheetButton.addEventListener("click", () => elements.sheetFileInput.click());
   elements.imageFileInput.addEventListener("change", onImageSelected);
+  elements.sheetFileInput.addEventListener("change", onSheetSelected);
   elements.removeImageButton.addEventListener("click", onRemoveImage);
   elements.gridSelect.addEventListener("change", onGridChange);
   elements.previewCanvas.addEventListener("click", onPreviewClick);
@@ -182,7 +188,7 @@ function updateActionCounter() {
 function onGridChange() {
   const g = getGridSize();
   if (elements.heroBadgeGrid) elements.heroBadgeGrid.textContent = `${g}x${g}`;
-  if (elements.pipelineText) elements.pipelineText.textContent = `${g}\u00d7${g} sheet \u00b7 2K resolution \u00b7 auto bg removal`;
+  if (elements.pipelineText) elements.pipelineText.textContent = `${g}\u00d7${g} sheet \u00b7 4K resolution \u00b7 auto bg removal`;
   updateActionCounter();
 }
 
@@ -192,7 +198,7 @@ async function onImageSelected() {
 
   const apiKey = elements.apiKeyInput.value.trim();
   if (!apiKey) {
-    setStatus("Enter your FAL key first.", "error");
+    setStatus("Enter your Replicate token first.", "error");
     elements.imageFileInput.value = "";
     return;
   }
@@ -227,6 +233,58 @@ async function onImageSelected() {
   elements.imageFileInput.value = "";
 }
 
+async function onSheetSelected() {
+  const file = elements.sheetFileInput.files[0];
+  if (!file) return;
+
+  setStatus("Importing sprite sheet...");
+
+  const objectUrl = URL.createObjectURL(file);
+  trackObjectUrl(objectUrl);
+
+  try {
+    const image = await loadImage(objectUrl);
+    const g = getGridSize();
+    const frameW = image.width / g;
+    const frameH = image.height / g;
+
+    if (!Number.isInteger(frameW) || !Number.isInteger(frameH)) {
+      throw new Error(file.name + " is " + image.width + "x" + image.height + ", which is not evenly divisible by the selected " + g + "x" + g + " grid.");
+    }
+
+    state.current.promptOriginal = file.name;
+    state.current.promptRewritten = "Imported local sprite sheet: " + file.name;
+    state.current.spriteUrl = "";
+    state.current.transparentSpriteUrl = "";
+    state.current.localSheetUrl = objectUrl;
+    state.current.localSheetFilename = file.name;
+    state.current.gridSize = g;
+    resetGifCache();
+
+    state.preview.image = image;
+    state.preview.objectUrl = objectUrl;
+    state.preview.playIndex = 0;
+    state.preview.lastTick = 0;
+    state.preview.playing = true;
+
+    elements.resultSection.classList.remove("hidden");
+    elements.promptText.textContent = state.current.promptRewritten;
+    elements.playToggle.textContent = "Pause";
+    elements.downloadTransparentButton.disabled = true;
+    if (elements.pipelineText) {
+      elements.pipelineText.textContent = g + "\u00d7" + g + " imported sheet \u00b7 " + image.width + "\u00d7" + image.height + "px \u00b7 " + Math.floor(frameW) + "\u00d7" + Math.floor(frameH) + "px frames";
+    }
+    hideWarnings();
+    drawFrame();
+    setStatus("Imported " + file.name + ". Previewing as " + g + "x" + g + ".", "success");
+    void appendHistoryAnimation(image, state.current.promptRewritten);
+  } catch (error) {
+    setStatus("Sheet import failed: " + error.message, "error");
+  } finally {
+    elements.sheetFileInput.value = "";
+  }
+}
+
 function onRemoveImage() {
   state.current.referenceImageUrl = "";
   elements.imagePreview.classList.add("hidden");
@@ -248,7 +306,7 @@ function fileToBase64(file) {
 }
 
 function restoreApiKey() {
-  const remembered = window.localStorage.getItem("fal_api_key") || "";
+  const remembered = window.localStorage.getItem("replicate_api_token") || "";
   if (remembered) {
     elements.apiKeyInput.value = remembered;
     showKeySaved();
@@ -261,7 +319,7 @@ function showKeySaved() {
 }
 
 function rememberApiKey(value) {
-  window.localStorage.setItem("fal_api_key", value);
+  window.localStorage.setItem("replicate_api_token", value);
 }
 
 function setStatus(message, mode = "") {
@@ -335,7 +393,7 @@ async function onGenerate() {
 
   const apiKey = elements.apiKeyInput.value.trim();
   if (!apiKey) {
-    setStatus("Missing FAL API key.", "error");
+    setStatus("Missing Replicate API token.", "error");
     return;
   }
 
@@ -383,6 +441,9 @@ async function onGenerate() {
     state.current.promptRewritten = data.promptRewritten || prompt;
     state.current.spriteUrl = data.spriteUrl || "";
     state.current.transparentSpriteUrl = data.transparentSpriteUrl || "";
+    state.current.localSheetUrl = "";
+    state.current.localSheetFilename = "";
+    elements.downloadTransparentButton.disabled = false;
     resetGifCache();
 
     elements.promptText.textContent = state.current.promptRewritten;
@@ -527,21 +588,33 @@ function startAnimationLoop() {
 }
 
 async function onDownloadSheet() {
+  if (state.current.localSheetUrl) {
+    const filename = state.current.localSheetFilename || "imported-sprite-sheet-" + state.current.gridSize + "x" + state.current.gridSize + ".png";
+    triggerDownload(state.current.localSheetUrl, filename);
+    setStatus("Downloaded " + filename + ".", "success");
+    return;
+  }
+
   if (!state.current.spriteUrl) {
     setStatus("No sheet available yet.", "error");
     return;
   }
   const g = state.current.gridSize;
-  await downloadFromFalUrl(state.current.spriteUrl, `sprite-sheet-${g}x${g}-2k.png`);
+  await downloadFromRemoteUrl(state.current.spriteUrl, `sprite-sheet-${g}x${g}-4k.png`);
 }
 
 async function onDownloadTransparent() {
+  if (state.current.localSheetUrl) {
+    setStatus("Transparent export for imported sheets needs the cleanup step; use Sheet or GIF here.", "error");
+    return;
+  }
+
   if (!state.current.transparentSpriteUrl) {
     setStatus("Transparent sheet is not available for this generation.", "error");
     return;
   }
   const g = state.current.gridSize;
-  await downloadFromFalUrl(state.current.transparentSpriteUrl, `sprite-sheet-${g}x${g}-2k-transparent.png`);
+  await downloadFromRemoteUrl(state.current.transparentSpriteUrl, `sprite-sheet-${g}x${g}-4k-transparent.png`);
 }
 
 async function onDownloadGif() {
@@ -719,10 +792,10 @@ function resetGifCache() {
   state.current.gifUrl = "";
 }
 
-async function downloadFromFalUrl(url, filename) {
+async function downloadFromRemoteUrl(url, filename) {
   const apiKey = elements.apiKeyInput.value.trim();
   if (!apiKey) {
-    setStatus("Missing FAL API key.", "error");
+    setStatus("Missing Replicate API token.", "error");
     return;
   }
 
@@ -745,9 +818,9 @@ function triggerDownload(objectUrl, filename) {
 }
 
 async function fetchMediaBlob(url, apiKey) {
-  const response = await fetch(`/api/fal/media?url=${encodeURIComponent(url)}`, {
+  const response = await fetch(`/api/media?url=${encodeURIComponent(url)}`, {
     headers: {
-      "x-fal-key": apiKey
+      "x-replicate-token": apiKey
     }
   });
 

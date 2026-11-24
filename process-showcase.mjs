@@ -2,7 +2,8 @@
 // ─────────────────────────────────────────────────
 // FalSprite showcase processor
 // Runs BRIA background removal → transparent PNG → animated GIF
-// Usage: node process-showcase.mjs --key YOUR_FAL_KEY [--concurrency 5] [--gif-size 200]
+// Usage: node process-showcase.mjs [--key YOUR_REPLICATE_TOKEN] [--concurrency 5] [--gif-size 200]
+// Token falls back to the REPLICATE_API_TOKEN environment variable.
 // ─────────────────────────────────────────────────
 
 import { writeFile, readFile } from "node:fs/promises";
@@ -11,13 +12,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import pkg from "gifenc";
+import {
+  REMOVE_BG_MODEL, createClient, extractOutputUrl
+} from "./lib/replicate.mjs";
 const { GIFEncoder, quantize, applyPalette } = pkg;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHOWCASE_DIR = path.join(__dirname, "public", "showcase");
 const SHOWCASE_JSON = path.join(__dirname, "public", "showcase.json");
 
-const REMOVE_BG_ENDPOINT = "fal-ai/bria/background/remove";
 const DEFAULT_GRID = 4;
 
 // Adaptive FPS: fewer frames = slower to appreciate each one
@@ -40,66 +43,31 @@ function parseArgs() {
 }
 
 const args = parseArgs();
-const API_KEY = args.key || "";
+const API_KEY = args.key || process.env.REPLICATE_API_TOKEN || "";
 const CONCURRENCY = Math.max(1, Math.min(10, parseInt(args.concurrency || "5", 10)));
 const FRAME_SIZE = Math.max(64, Math.min(512, parseInt(args["gif-size"] || "200", 10)));
 const REGEN_GIF = "regen-gif" in args;
 
 if (!API_KEY) {
-  console.error("Usage: node process-showcase.mjs --key YOUR_FAL_KEY [--concurrency 5] [--gif-size 200]");
+  console.error("Usage: node process-showcase.mjs --key YOUR_REPLICATE_TOKEN [--concurrency 5] [--gif-size 200]");
+  console.error("       (or set REPLICATE_API_TOKEN)");
   process.exit(1);
 }
 
-// ── FAL API helpers ───────────────────────────
-
-async function uploadToFalStorage(buffer, contentType, filename) {
-  const initRes = await fetch("https://rest.alpha.fal.ai/storage/upload/initiate", {
-    method: "POST",
-    headers: {
-      "Authorization": `Key ${API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ file_name: filename, content_type: contentType })
-  });
-
-  if (!initRes.ok) throw new Error(`Storage initiate failed (${initRes.status})`);
-  const { upload_url, file_url } = await initRes.json();
-
-  const putRes = await fetch(upload_url, {
-    method: "PUT",
-    headers: { "Content-Type": contentType },
-    body: buffer
-  });
-
-  if (!putRes.ok) throw new Error(`Storage PUT failed (${putRes.status})`);
-  return file_url;
-}
+// ── Replicate API helpers ─────────────────────
 
 async function removeBackground(imageUrl) {
-  const res = await fetch(`https://fal.run/${REMOVE_BG_ENDPOINT}`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Key ${API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ image_url: imageUrl })
-  });
-
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-  if (!res.ok) throw new Error(`BRIA failed (${res.status})`);
-
-  const url = data?.image?.url;
+  const client = createClient(API_KEY);
+  const output = await client.run(REMOVE_BG_MODEL, { input: { image_url: imageUrl } });
+  const url = extractOutputUrl(output);
   if (!url) throw new Error("BRIA returned no image URL");
   return url;
 }
 
 async function downloadImage(url) {
-  const res = await fetch(url, {
-    headers: { "Authorization": `Key ${API_KEY}` }
-  });
+  const headers = {};
+  if (new URL(url).hostname === "api.replicate.com") headers.Authorization = `Bearer ${API_KEY}`;
+  const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(`Download failed (${res.status})`);
   return Buffer.from(await res.arrayBuffer());
 }
@@ -224,7 +192,9 @@ async function processItem(item, idx, total) {
     process.stdout.write(`  [${idx + 1}/${total}] ${label}... upload→`);
 
     const spriteBuffer = await readFile(spriteFile);
-    const remoteUrl = await uploadToFalStorage(spriteBuffer, "image/png", path.basename(spriteFile));
+    const upClient = createClient(API_KEY);
+    const upFile = await upClient.files.create(spriteBuffer);
+    const remoteUrl = upFile.urls.get;
 
     process.stdout.write("bria→");
     const transparentRemoteUrl = await removeBackground(remoteUrl);
